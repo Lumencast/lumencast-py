@@ -19,7 +19,7 @@ Python SDK porté idiomatically depuis le Go reference (`lumencast-go`). Tous le
 | go | rs | PASS |                | js | rs | PASS |                | py | rs | PASS |                | rs | py | PASS |
 ```
 
-Run via `LUMENCAST_PROTOCOL_REPO=$PWD bash interop/run-matrix.sh` from the lumencast-protocol checkout. The env var is a workaround for a pre-existing JS path-resolution quirk in `lumencast-js/packages/protocol/dist/cli.js:120` (it computes the fallback scenarios path as `resolve(process.cwd(), "../lumencast-protocol/...")`, which from `interop/` becomes `lumencast-protocol/lumencast-protocol/...`). Not a py issue ; worth filing as a JS follow-up.
+Run via `bash interop/run-matrix.sh` from the lumencast-protocol checkout. (A prior path-resolution quirk in the JS conformance CLI required `LUMENCAST_PROTOCOL_REPO=$PWD` ; fixed upstream in https://github.com/Lumencast/lumencast-js/pull/4 — once merged the env var is no longer required.)
 
 ## Validation locale
 
