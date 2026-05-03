@@ -268,11 +268,23 @@ async def _run_step(
         return
 
     if step.kind is StepKind.EXPECT_NO_FRAME_FOR:
+        # SCENARIO-FORMAT.md `expect-no-frame-for` § Connection-close
+        # semantics : a clean server-initiated close (codes 1000 / 1001 /
+        # 1005) within the duration is success — the conceptual contract
+        # is "no data flowed". Abnormal closures remain failures.
         d_secs = step.duration_ms / 1000.0
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=d_secs)
         except TimeoutError:
             return
+        except _ConnectionClosed as exc:
+            code = getattr(getattr(exc, "rcvd", None), "code", None)
+            if code is None:
+                code = getattr(getattr(exc, "sent", None), "code", None)
+            if code in (1000, 1001, 1005):
+                return
+            msg = f"expect-no-frame-for: abnormal close code {code} within {d_secs}s"
+            raise AssertionError(msg) from exc
         msg = f"expected silence for {d_secs}s, got frame: {raw!r}"
         raise AssertionError(msg)
 
