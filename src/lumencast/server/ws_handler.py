@@ -106,11 +106,24 @@ async def handle_ws(server: Server, ws: WebSocket) -> None:
         return
 
     live = sub_frame.scene == ""
-    sub, snap = await scene.subscribe(live=live)
+    # LSDP/1.1 §4.1, §18 — honour since_sequence when the replay buffer
+    # covers the gap. Otherwise fall back to a fresh snapshot at the
+    # current scene seq.
+    sub, snap, replay_records = await scene.subscribe_with_resume(
+        live=live,
+        since_sequence=sub_frame.since_sequence,
+    )
     try:
-        await ws.send_text(encode(snap))
+        if snap is not None:
+            await ws.send_text(encode(snap))
+        else:
+            from lumencast.protocol.frames import Delta as DeltaFrame  # local
+
+            for r in replay_records:
+                d = DeltaFrame(seq=r.seq, patches=list(r.patches), cause=r.cause)
+                await ws.send_text(encode(d))
     except Exception as e:
-        _log.debug("snapshot send failed: %s", e)
+        _log.debug("initial frame send failed: %s", e)
         await scene.unsubscribe(sub)
         return
 
@@ -166,7 +179,7 @@ async def _run_session(
                 except VersionMismatchError as e:
                     await _send_error(
                         ws,
-                        sub.seq.next_server(),
+                        scene.current_seq(),
                         ErrorCode.VERSION_MISMATCH,
                         str(e),
                         recoverable=False,
@@ -176,7 +189,7 @@ async def _run_session(
                 except (DecodeError, UnknownTypeError) as e:
                     await _send_error(
                         ws,
-                        sub.seq.next_server(),
+                        scene.current_seq(),
                         ErrorCode.INTERNAL,
                         str(e),
                         recoverable=False,
@@ -235,7 +248,7 @@ async def _dispatch(
             recoverable = code is not ErrorCode.AUTH_DENIED
             await _send_error(
                 ws,
-                sub.seq.next_server(),
+                scene.current_seq(),
                 code,
                 err_msg,
                 recoverable=recoverable,
@@ -256,7 +269,7 @@ async def _dispatch(
     if isinstance(msg, Subscribe):
         await _send_error(
             ws,
-            sub.seq.next_server(),
+            scene.current_seq(),
             ErrorCode.INTERNAL,
             "duplicate subscribe",
             recoverable=False,

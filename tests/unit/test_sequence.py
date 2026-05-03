@@ -53,17 +53,30 @@ def test_observe_gap_raises() -> None:
         t.observe_server(3)
 
 
-def test_observe_first_must_be_one() -> None:
+def test_observe_first_accepts_any_positive() -> None:
+    # LSDP/1.1 §18.1.1 — fresh tracker accepts any seq >= 1 as the
+    # baseline (per-scene seq, late-joining subscribers may see snapshot
+    # at seq > 1). Only seq=0 is rejected.
+    t = SequenceTracker()
+    assert t.observe_server(42) is False
+    assert t.observe_server(43) is False
+    assert t.current() == 43
+
+
+def test_observe_seq_zero_rejected() -> None:
     t = SequenceTracker()
     with pytest.raises(InvalidSeqStartError):
-        t.observe_server(2)
+        t.observe_server(0)
 
 
-def test_observe_one_resets_after_scene_changed() -> None:
+def test_observe_snapshot_rebases() -> None:
+    # After scene_changed or back-pressure recovery, observe_snapshot
+    # rebases the tracker to the snapshot's seq regardless of previous
+    # state.
     t = SequenceTracker()
     t.observe_server(1)
     t.observe_server(2)
     t.observe_server(3)
-    # scene_changed → next snapshot at seq=1 again.
-    assert t.observe_server(1) is False
+    t.observe_snapshot(1)  # new scene, fresh seq=1
     assert t.observe_server(2) is False
+    assert t.current() == 2
