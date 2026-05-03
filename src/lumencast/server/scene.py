@@ -31,13 +31,16 @@ class EmptyPatchesError(ValueError):
 class Subscription:
     """One subscriber's per-WS pipe.
 
+    LSDP/1.1 §18.1.1 — seq is per-scene, not per-subscription. The
+    Subscription dataclass no longer carries its own SequenceTracker ;
+    outgoing frames read scene.current_seq() instead.
+
     ``eq=False`` keeps the default ``id()``-based hash so the kit can use
     a :class:`set` to track subscribers without instances accidentally
     comparing equal on field values.
     """
 
     queue: asyncio.Queue[Any] = field(default_factory=lambda: asyncio.Queue(maxsize=256))
-    seq: SequenceTracker = field(default_factory=SequenceTracker)
     live: bool = False
     closed: bool = False
     stale: bool = False
@@ -76,6 +79,10 @@ class Scene:
     ) -> None:
         self._id = scene_id
         self._version = scene_version
+        from lumencast.server.replay_buffer import (  # local — circular avoidance
+            DEFAULT_REPLAY_BUFFER_SIZE,
+            ReplayBuffer,
+        )
         from lumencast.server.store import Store  # local import — tighter cycle
 
         self._store = Store()
@@ -85,6 +92,25 @@ class Scene:
         if operator_inputs:
             for spec in operator_inputs:
                 self._declared_inputs[spec.path] = spec
+        # LSDP/1.1 §18.1.1 — per-scene monotonic seq, pre-seeded to 1.
+        self._seq: SequenceTracker = SequenceTracker()
+        self._seq.next_server()  # seed at 1 ; first emit advances to 2
+        self._replay = ReplayBuffer(DEFAULT_REPLAY_BUFFER_SIZE)
+
+    def current_seq(self) -> int:
+        """LSDP/1.1 §18.1.1 — current scene seq counter (1 on a fresh
+        scene, advances on each emit). Late-joining subscribers ship
+        snapshot at this value."""
+        return self._seq.current()
+
+    def replay_since(self, since_seq: int) -> Any:
+        """LSDP/1.1 §18.1 — buffered records strictly after since_seq.
+
+        Returns ``ReplaySlice(records, covered)``. ``covered=False``
+        means the request is older than the buffer's window — caller
+        MUST fall back to a fresh snapshot.
+        """
+        return self._replay.since(since_seq)
 
     @property
     def id(self) -> str:
@@ -119,15 +145,21 @@ class Scene:
         """Apply a delta + fan it out to every subscriber.
 
         Optional ``cause`` (LSDP/1.1 §3.2.3) propagates as the resulting
-        Delta.cause for every subscriber's frame.
+        Delta.cause for every subscriber's frame. The per-scene seq
+        (§18.1.1) is allocated once and shared across all subscribers ;
+        the buffer records the emission for replay.
         """
         if not patches:
             raise EmptyPatchesError("scene: empty patches")
         applied = await self._store.apply(patches)
         wire = [Patch(path=p, value=v) for p, v in applied]
         async with self._lock:
+            from lumencast.server.replay_buffer import ReplayRecord  # local
+
+            seq = self._seq.next_server()
+            self._replay.push(ReplayRecord(seq=seq, patches=list(wire), cause=cause))
             for sub in list(self._subscribers):
-                await self._send_delta(sub, wire, cause=cause)
+                await self._send_delta(sub, seq, wire, cause=cause)
 
     async def reset(self) -> None:
         """Drop every subscriber and clear state. Test-harness use."""
@@ -139,7 +171,13 @@ class Scene:
         await self._store.reset()
 
     async def subscribe(self, *, live: bool = False) -> tuple[Subscription, Snapshot]:
-        """Attach a subscriber and return the initial snapshot atomically."""
+        """Attach a subscriber and return the initial snapshot atomically.
+
+        Per LSDP/1.1 §18.1.1, the snapshot ships at the current scene
+        seq (not always 1) — late-joining subscribers see whatever
+        value the scene has reached. Use :meth:`subscribe_with_resume`
+        instead when honouring ``since_sequence``.
+        """
         sub = Subscription(live=live)
         async with self._lock:
             self._subscribers.add(sub)
@@ -148,9 +186,40 @@ class Scene:
             scene_id=self._id,
             scene_version=self._version,
             state=state,
-            seq=sub.seq.next_server(),
+            seq=self._seq.current(),
         )
         return sub, snap
+
+    async def subscribe_with_resume(
+        self,
+        *,
+        live: bool = False,
+        since_sequence: int | None = None,
+    ) -> tuple[Subscription, Snapshot | None, list[Any]]:
+        """LSDP/1.1 §4.1, §18 — attach a subscriber with optional resume.
+
+        When ``since_sequence`` is provided AND the replay buffer covers
+        the gap, returns ``(sub, None, [ReplayRecord, ...])`` — the
+        caller MUST ship those replay deltas in order.
+        Otherwise returns ``(sub, Snapshot, [])`` — caller ships the
+        snapshot. ``snap`` is non-None iff the records list is empty.
+        """
+        sub = Subscription(live=live)
+        async with self._lock:
+            self._subscribers.add(sub)
+            state = await self._store.snapshot()
+            cur_seq = self._seq.current()
+            if since_sequence is not None and 0 < since_sequence <= cur_seq:
+                slice_ = self._replay.since(since_sequence)
+                if slice_.covered:
+                    return sub, None, slice_.records
+        snap = Snapshot(
+            scene_id=self._id,
+            scene_version=self._version,
+            state=state,
+            seq=cur_seq,
+        )
+        return sub, snap, []
 
     async def unsubscribe(self, sub: Subscription) -> None:
         """Detach a subscriber. Idempotent."""
@@ -205,39 +274,46 @@ class Scene:
         return False
 
     async def _refresh_all(self) -> None:
-        """Fan a fresh snapshot to every subscriber after a Set()."""
+        """Fan a fresh snapshot to every subscriber after a Set().
+
+        Under LSDP/1.1 §18.1.1, snapshots ride the current scene seq
+        without advancing it (this is a back-pressure / re-seed signal,
+        not a new wire emission).
+        """
         async with self._lock:
             state = await self._store.snapshot()
+            cur_seq = self._seq.current()
             for sub in list(self._subscribers):
-                sub.seq.reset()
                 snap = Snapshot(
                     scene_id=self._id,
                     scene_version=self._version,
                     state=state,
-                    seq=sub.seq.next_server(),
+                    seq=cur_seq,
                 )
                 await self._send_or_drop(sub, snap)
 
     async def _send_delta(
         self,
         sub: Subscription,
+        seq: int,
         patches: list[Patch],
         *,
         cause: Cause | None = None,
     ) -> None:
-        """Enqueue a Delta ; fall back to a fresh snapshot on back-pressure."""
-        delta = Delta(patches=patches, seq=sub.seq.next_server(), cause=cause)
+        """Enqueue a Delta with the given (per-scene) seq ; fall back to
+        a fresh snapshot on back-pressure (snapshot rides the current
+        scene seq without advancing it).
+        """
+        delta = Delta(patches=patches, seq=seq, cause=cause)
         try:
             sub.queue.put_nowait(delta)
         except asyncio.QueueFull:
-            # Buffer full — collapse to snapshot recovery.
-            sub.seq.reset()
             state = await self._store.snapshot()
             snap = Snapshot(
                 scene_id=self._id,
                 scene_version=self._version,
                 state=state,
-                seq=sub.seq.next_server(),
+                seq=self._seq.current(),
             )
             await self._send_or_drop(sub, snap)
 
@@ -250,9 +326,9 @@ class Scene:
     async def migrate_subscribers_from(self, prev: Scene) -> list[Subscription]:
         """Move every live subscriber from ``prev`` to this scene.
 
-        Each migrated subscriber receives a ``SceneChanged`` followed by a
-        fresh ``Snapshot`` at ``seq = 1``. Returns the list of migrated
-        subscriptions for caller-side accounting.
+        LSDP/1.1 §18.1.1 — scene_changed advances prev's seq one final
+        step ; the snapshot ships at THIS scene's current seq (its own
+        independent counter).
         """
         async with prev._lock:
             live = [s for s in prev._subscribers if s.live]
@@ -260,21 +336,23 @@ class Scene:
                 prev._subscribers.discard(s)
         if not live:
             return []
+        # Advance prev's seq one last time for the SceneChanged frame.
+        prev_seq = prev._seq.next_server()
         async with self._lock:
             state = await self._store.snapshot()
+            cur_seq = self._seq.current()
             for sub in live:
                 changed = SceneChanged(
                     scene_id=self._id,
                     scene_version=self._version,
-                    seq=sub.seq.next_server(),
+                    seq=prev_seq,
                 )
                 await self._send_or_drop(sub, changed)
-                sub.seq.reset()
                 snap = Snapshot(
                     scene_id=self._id,
                     scene_version=self._version,
                     state=state,
-                    seq=sub.seq.next_server(),
+                    seq=cur_seq,
                 )
                 await self._send_or_drop(sub, snap)
                 self._subscribers.add(sub)

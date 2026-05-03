@@ -1,4 +1,10 @@
-"""Per-subscription sequence tracker with gap detection."""
+"""LSDP/1.1 sequence tracker with gap detection.
+
+LSDP/1.1 §18.1.1 — the seq counter is per-scene, NOT per-subscription.
+The first frame of a fresh subscription can carry any seq >= 1 (late-
+joining subscribers see the current scene seq). The tracker rebases to
+the snapshot value after scene_changed via observe_snapshot.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +20,13 @@ class GapError(Exception):
 
 
 class InvalidSeqStartError(Exception):
-    """First frame of a subscription does not carry ``seq == 1``."""
+    """First frame of a subscription carries ``seq < 1``.
+
+    LSDP/1.1 relaxed the constraint from "must be exactly 1" to "must
+    be >= 1" — a fresh tracker accepts any positive value as the
+    baseline (per-scene seq, late-joining subscribers may see snapshot
+    at seq > 1). Only ``seq == 0`` is rejected.
+    """
 
 
 class SequenceTracker:
@@ -59,19 +71,32 @@ class SequenceTracker:
         Returns True if the caller should drop the frame as a replay.
         Returns False if the frame is the next expected value (caller
         proceeds normally). Raises :class:`GapError` on a gap or
-        :class:`InvalidSeqStartError` if the first observed seq is not 1.
+        :class:`InvalidSeqStartError` if the first observed seq < 1.
         """
         with self._lock:
-            if seq == 1:
-                self._cur = 1
-                return False
             if self._cur == 0:
-                raise InvalidSeqStartError(
-                    f"protocol: subscription must start at seq=1, got seq={seq}"
-                )
+                # LSDP/1.1 §18.1.1 — fresh tracker accepts any seq >= 1
+                # as the baseline (per-scene seq).
+                if seq < 1:
+                    raise InvalidSeqStartError(
+                        f"protocol: subscription must start at seq>=1, got seq={seq}"
+                    )
+                self._cur = seq
+                return False
             if seq == self._cur + 1:
                 self._cur = seq
                 return False
             if seq <= self._cur:
                 return True
             raise GapError(f"protocol: sequence gap, expected {self._cur + 1}, got {seq}")
+
+    def observe_snapshot(self, seq: int) -> None:
+        """Rebase the tracker to a snapshot's seq.
+
+        Called after ``scene_changed`` or back-pressure recovery — the
+        tracker takes the snapshot value as the new baseline regardless
+        of previous state. Negative or zero seq is silently ignored.
+        """
+        with self._lock:
+            if seq >= 1:
+                self._cur = seq
