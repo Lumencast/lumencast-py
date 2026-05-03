@@ -14,6 +14,7 @@ FRAME_PONG: str = "pong"
 FRAME_SUBSCRIBE: str = "subscribe"
 FRAME_INPUT: str = "input"
 FRAME_PING: str = "ping"
+FRAME_UNSUBSCRIBE: str = "unsubscribe"  # LSDP/1.1 §4.4
 
 
 class Role(str, Enum):

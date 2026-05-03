@@ -19,9 +19,9 @@ from lumencast.protocol.codec import (
     decode_client,
     encode,
 )
-from lumencast.protocol.envelope import SUBPROTOCOL
+from lumencast.protocol.envelope import SUBPROTOCOLS
 from lumencast.protocol.errors import ErrorCode
-from lumencast.protocol.frames import Error, Input, Ping, Pong, Subscribe
+from lumencast.protocol.frames import Cause, Error, Input, Ping, Pong, Subscribe, Unsubscribe
 from lumencast.protocol.types import Role
 from lumencast.server.auth import AuthError
 from lumencast.server.scene import Scene, Subscription
@@ -51,17 +51,26 @@ async def handle_ws(server: Server, ws: WebSocket) -> None:
     4. Authenticate ; resolve scene ; emit Snapshot.
     5. Run reader + writer until either side errors.
     """
-    # The LSDP/1 § 1 contract requires the client to advertise lsdp.v1 in
-    # Sec-WebSocket-Protocol. Some ASGI backends do not populate
-    # ``scope["subprotocols"]`` when the legacy websockets backend is in
-    # play, so we also fall back to inspecting the raw header.
+    # The LSDP/1 § 1 contract requires the client to advertise either
+    # lsdp.v1 or lsdp.v1.1 in Sec-WebSocket-Protocol. We prefer 1.1 when
+    # both are offered, fall back to 1.0 otherwise. Some ASGI backends do
+    # not populate ``scope["subprotocols"]`` when the legacy websockets
+    # backend is in play, so we also fall back to inspecting the raw header.
     requested_protocols = _requested_subprotocols(ws)
-    if SUBPROTOCOL not in requested_protocols:
+    chosen: str | None = None
+    for candidate in SUBPROTOCOLS:  # 1.1 preferred, 1.0 fallback
+        if candidate in requested_protocols:
+            chosen = candidate
+            break
+    if chosen is None:
         await ws.accept()
-        await ws.close(code=WS_CLOSE_POLICY_VIOLATION, reason="lsdp.v1 subprotocol required")
+        await ws.close(
+            code=WS_CLOSE_POLICY_VIOLATION,
+            reason="lsdp.v1 or lsdp.v1.1 subprotocol required",
+        )
         return
 
-    await ws.accept(subprotocol=SUBPROTOCOL)
+    await ws.accept(subprotocol=chosen)
 
     try:
         sub_frame = await _read_subscribe(ws)
@@ -204,25 +213,45 @@ async def _dispatch(
     scene: Scene,
     sub: Subscription,
     identity: Any,
-    msg: Subscribe | Input | Ping | Pong,
+    msg: Subscribe | Input | Ping | Pong | Unsubscribe,
 ) -> None:
     """Route a parsed client frame to its handler."""
     if isinstance(msg, Input):
-        result = await scene.apply_input(identity, msg.patches)
+        # LSDP/1.1 §4.2 — derive provenance for the resulting delta when
+        # the input carries a client_msg_id. Threaded through to the
+        # scene so the emitted delta can echo it as cause.input_id.
+        cause = None
+        if msg.client_msg_id is not None:
+            subject = getattr(identity, "subject", None) or getattr(identity, "role", "operator")
+            role = getattr(identity, "role", "operator")
+            cause = Cause(source=f"{role}:{subject}", input_id=msg.client_msg_id)
+        result = await scene.apply_input(identity, msg.patches, cause=cause)
         if result is not None:
-            code_str, err_msg = result
+            code_str, err_msg, err_path = result
             try:
                 code = ErrorCode(code_str)
             except ValueError:
                 code = ErrorCode.INTERNAL
             recoverable = code is not ErrorCode.AUTH_DENIED
-            await _send_error(ws, sub.seq.next_server(), code, err_msg, recoverable=recoverable)
+            await _send_error(
+                ws,
+                sub.seq.next_server(),
+                code,
+                err_msg,
+                recoverable=recoverable,
+                path=err_path,
+            )
         return
     if isinstance(msg, Ping):
-        await ws.send_text(encode(Pong()))
+        # LSDP/1.1 §3.5 — echo nonce verbatim if present.
+        await ws.send_text(encode(Pong(nonce=msg.nonce)))
         return
     if isinstance(msg, Pong):
         # Liveness reply ; nothing to do.
+        return
+    if isinstance(msg, Unsubscribe):
+        # LSDP/1.1 §4.4 — clean teardown. Close WS within 1s, no error.
+        await ws.close(code=1000)
         return
     if isinstance(msg, Subscribe):
         await _send_error(
@@ -241,9 +270,20 @@ async def _send_error(
     message: str,
     *,
     recoverable: bool,
+    path: str | None = None,
 ) -> None:
-    """Encode and ship one Error frame ; swallow send failures."""
-    frame = Error(seq=seq, code=code.value, message=message, recoverable=recoverable)
+    """Encode and ship one Error frame ; swallow send failures.
+
+    ``path`` MUST be set on path-scoped error codes per LSDP/1.0.1 §3.4.1
+    (``WRITE_FORBIDDEN``, ``UNKNOWN_PATH``, ``INVALID_VALUE``).
+    """
+    frame = Error(
+        seq=seq,
+        code=code.value,
+        message=message,
+        recoverable=recoverable,
+        path=path,
+    )
     try:
         await ws.send_text(encode(frame))
     except Exception as e:

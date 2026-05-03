@@ -13,7 +13,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from lumencast.protocol.frames import Delta, Patch, SceneChanged, Snapshot
+from lumencast.protocol.frames import Cause, Delta, Patch, SceneChanged, Snapshot
 from lumencast.protocol.leaf_path import has_prefix
 from lumencast.protocol.sequence import SequenceTracker
 from lumencast.protocol.types import Role
@@ -115,15 +115,19 @@ class Scene:
         await self._store.apply(patches)
         await self._refresh_all()
 
-    async def emit(self, patches: dict[str, Any]) -> None:
-        """Apply a delta + fan it out to every subscriber."""
+    async def emit(self, patches: dict[str, Any], *, cause: Cause | None = None) -> None:
+        """Apply a delta + fan it out to every subscriber.
+
+        Optional ``cause`` (LSDP/1.1 §3.2.3) propagates as the resulting
+        Delta.cause for every subscriber's frame.
+        """
         if not patches:
             raise EmptyPatchesError("scene: empty patches")
         applied = await self._store.apply(patches)
         wire = [Patch(path=p, value=v) for p, v in applied]
         async with self._lock:
             for sub in list(self._subscribers):
-                await self._send_delta(sub, wire)
+                await self._send_delta(sub, wire, cause=cause)
 
     async def reset(self) -> None:
         """Drop every subscriber and clear state. Test-harness use."""
@@ -159,27 +163,35 @@ class Scene:
         self,
         identity: Identity,
         patches: list[Patch],
-    ) -> tuple[str, str] | None:
+        *,
+        cause: Cause | None = None,
+    ) -> tuple[str, str, str | None] | None:
         """Validate + commit an Input frame.
 
-        Returns ``None`` on success, or ``(error_code, message)`` when the
-        frame was rejected. Validation is atomic — if any patch fails,
-        none are applied.
+        Returns ``None`` on success, or ``(error_code, message, path)`` when
+        the frame was rejected. ``path`` is set on path-scoped error codes
+        (LSDP/1.0.1 §3.4.1) and ``None`` for ``INVALID_VALUE`` cases that
+        are not tied to a specific path. Validation is atomic — if any
+        patch fails, none are applied.
+
+        Optional ``cause`` (LSDP/1.1 §3.2.3) is forwarded to the resulting
+        Delta so optimistic-UI clients can correlate the echo via
+        ``cause.input_id``.
         """
         if not patches:
-            return ("INVALID_VALUE", "input: empty patches")
+            return ("INVALID_VALUE", "input: empty patches", None)
         for p in patches:
             if not identity.can_write(p.path):
-                return ("WRITE_FORBIDDEN", f"write forbidden: {p.path}")
+                return ("WRITE_FORBIDDEN", f"write forbidden: {p.path}", p.path)
             if not self._accepts_input_path(identity.role, p.path):
-                return ("UNKNOWN_PATH", f"unknown path: {p.path}")
+                return ("UNKNOWN_PATH", f"unknown path: {p.path}", p.path)
             spec = self._declared_inputs.get(p.path)
             if spec is not None:
                 err = check_constraint(spec, p.value)
                 if err is not None:
-                    return ("INVALID_VALUE", f"invalid value at {p.path}: {err}")
+                    return ("INVALID_VALUE", f"invalid value at {p.path}: {err}", p.path)
         as_dict = {p.path: p.value for p in patches}
-        await self.emit(as_dict)
+        await self.emit(as_dict, cause=cause)
         return None
 
     def _accepts_input_path(self, role: Role | None, path: str) -> bool:
@@ -206,9 +218,15 @@ class Scene:
                 )
                 await self._send_or_drop(sub, snap)
 
-    async def _send_delta(self, sub: Subscription, patches: list[Patch]) -> None:
+    async def _send_delta(
+        self,
+        sub: Subscription,
+        patches: list[Patch],
+        *,
+        cause: Cause | None = None,
+    ) -> None:
         """Enqueue a Delta ; fall back to a fresh snapshot on back-pressure."""
-        delta = Delta(patches=patches, seq=sub.seq.next_server())
+        delta = Delta(patches=patches, seq=sub.seq.next_server(), cause=cause)
         try:
             sub.queue.put_nowait(delta)
         except asyncio.QueueFull:
