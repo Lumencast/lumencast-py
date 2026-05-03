@@ -19,7 +19,20 @@ VERSION: int = 1
 """LSDP protocol major. Receivers MUST reject ``v != 1`` frames."""
 
 SUBPROTOCOL: str = "lsdp.v1"
-"""WebSocket subprotocol tag — dot-form per the spec § 1."""
+"""LSDP/1.0 WebSocket subprotocol tag. Kept for backwards-compatible
+negotiation with 1.0-only clients."""
+
+SUBPROTOCOL_V1_1: str = "lsdp.v1.1"
+"""LSDP/1.1 WebSocket subprotocol tag. Clients advertising this opt
+into the additive 1.1 frame surface (``since_sequence`` resume,
+``unsubscribe``, per-leaf transition directive, ``cause``, ``nonce`` on
+ping/pong, ``client_msg_id`` on input, ``from_scene_id`` + show
+transition on ``scene_changed``)."""
+
+SUBPROTOCOLS: tuple[str, ...] = (SUBPROTOCOL_V1_1, SUBPROTOCOL)
+"""Canonical advertise/accept list, ordered by preference (1.1 first,
+1.0 fallback). Servers MUST advertise both to remain compatible with
+1.0 clients."""
 
 
 def encode_json(value: Any) -> str:
