@@ -137,7 +137,9 @@ def test_invalid_transition_kind_rejected() -> None:
 
 
 def test_cause_without_source_rejected() -> None:
-    raw = '{"v":1,"type":"delta","seq":1,"patches":[{"path":"x","value":1}],"cause":{"input_id":"x"}}'
+    raw = (
+        '{"v":1,"type":"delta","seq":1,"patches":[{"path":"x","value":1}],"cause":{"input_id":"x"}}'
+    )
     with pytest.raises(DecodeError, match=r"cause\.source"):
         decode_server(raw)
 
