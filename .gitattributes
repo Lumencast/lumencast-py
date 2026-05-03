@@ -1,0 +1,12 @@
+# Normalise line endings — text files use LF in the repo regardless of platform.
+* text=auto eol=lf
+
+# Binary patterns
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar.gz binary
+*.whl binary

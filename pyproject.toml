@@ -1,0 +1,149 @@
+[project]
+name = "lumencast"
+version = "0.1.0"
+description = "Lumencast SDK + CLI — LSDP/1 server kit and conformance harness for Python"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Lumencast Maintainers" },
+]
+keywords = ["lumencast", "lsdp", "websocket", "broadcast", "leaf-state-delta"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Networking",
+]
+
+dependencies = [
+    "PyYAML>=6.0.1",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "websockets>=13.0",
+]
+interop = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "websockets>=13.0",
+    "httpx>=0.27",
+]
+dev = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "websockets>=13.0",
+    "httpx>=0.27",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+lumencast = "lumencast.cli.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Lumencast/lumencast-py"
+Documentation = "https://github.com/Lumencast/lumencast-protocol"
+Repository = "https://github.com/Lumencast/lumencast-py"
+Issues = "https://github.com/Lumencast/lumencast-py/issues"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lumencast"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/lumencast",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "RUF",  # ruff
+    "PL",   # pylint
+    "SIM",  # simplify
+    "TCH",  # type-checking imports
+    "PTH",  # use pathlib
+]
+ignore = [
+    "E501",     # line too long (line-length already handles it)
+    "PLR2004",  # magic value used in comparison
+    "PLR0911",  # too many return statements
+    "PLR0912",  # too many branches
+    "PLR0913",  # too many arguments
+    "PLR0915",  # too many statements
+    "PLC0415",  # import not at top — we use lazy imports for optional extras
+    "TC001",    # move app import to TYPE_CHECKING — adds noise for marginal gain
+    "TC002",    # ditto for 3rd-party
+    "TC003",    # ditto for stdlib
+    "UP042",    # `class X(str, Enum)` — kept for backward-compat with the Go reference shape
+    "SIM105",   # contextlib.suppress vs try/except/pass — both are clear, prefer try
+    "SIM110",   # `return any(...)` vs explicit loop — explicit is clearer here
+    "RUF006",   # store reference to create_task — fire-and-forget is intentional
+    "BLE001",   # blanket Exception catches — websocket layer is full of these by design
+    "B008",     # function call in default arg — FastAPI Body() depends on this
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PLR2004", "S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+strict_equality = true
+files = ["src/lumencast", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["yaml", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: integration tests (may spawn subprocesses)",
+    "conformance: conformance fixture round-trip tests",
+]

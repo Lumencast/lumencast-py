@@ -1,0 +1,10 @@
+Lumencast Python SDK
+Copyright 2026 Lumencast Maintainers
+
+This product includes software developed by the Lumencast project
+(https://github.com/Lumencast).
+
+Licensed under the Apache License, Version 2.0 (the "License").
+
+The LSDP/1 wire protocol and LSML 1.0 scene format are specified in
+the lumencast-protocol repository.
