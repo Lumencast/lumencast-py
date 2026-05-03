@@ -2,10 +2,24 @@
 
 **Date :** 2026-05-03
 **Chantier :** `briefs/chantier-lumencast-py.md` (Wave 2b, Python SDK + CLI)
+**Repo :** https://github.com/Lumencast/lumencast-py (initial commit `e646875`, public, branch `main`)
+**Matrix PR :** https://github.com/Lumencast/lumencast-protocol/pull/9 (`feat/interop-py-row`)
 
 ## TL;DR
 
-Python SDK porté idiomatically depuis le Go reference (`lumencast-go`). Tous les gates locaux verts, including the critical interop self-test (9/9 required scenarios PASS).
+Python SDK porté idiomatically depuis le Go reference (`lumencast-go`). Tous les gates locaux verts, including the critical interop self-test (9/9 required scenarios PASS) AND the full cross-language matrix (12/12 cells PASS).
+
+## Cross-language matrix — 4×4 = 12/12 PASS
+
+```
+| Server | Harness | Outcome |    | Server | Harness | Outcome |    | Server | Harness | Outcome |    | Server | Harness | Outcome |
+|---|---|---|                     |---|---|---|                     |---|---|---|                     |---|---|---|
+| go | js | PASS |                | js | go | PASS |                | py | go | PASS |                | rs | go | PASS |
+| go | py | PASS |                | js | py | PASS |                | py | js | PASS |                | rs | js | PASS |
+| go | rs | PASS |                | js | rs | PASS |                | py | rs | PASS |                | rs | py | PASS |
+```
+
+Run via `LUMENCAST_PROTOCOL_REPO=$PWD bash interop/run-matrix.sh` from the lumencast-protocol checkout. The env var is a workaround for a pre-existing JS path-resolution quirk in `lumencast-js/packages/protocol/dist/cli.js:120` (it computes the fallback scenarios path as `resolve(process.cwd(), "../lumencast-protocol/...")`, which from `interop/` becomes `lumencast-protocol/lumencast-protocol/...`). Not a py issue ; worth filing as a JS follow-up.
 
 ## Validation locale
 
